@@ -1,0 +1,217 @@
+// Tests de integración: corren contra la API real de WebAbility (o contra el
+// host indicado en WA_TEST_BASE_URL) usando credenciales reales. Se saltan
+// automáticamente si no hay credenciales configuradas, así que no rompen CI
+// ni corridas locales normales (`go test ./...` sigue usando solo los mocks
+// de webability_test.go).
+//
+// Para ejecutarlos:
+//
+//	export WA_TEST_CLIENT_ID=tu_client_id
+//	export WA_TEST_TOKEN=tu_token_secreto
+//	# opcional, para apuntar a un entorno distinto al de producción:
+//	export WA_TEST_BASE_URL=https://staging.api.webability.info
+//	go test -run Integration -v ./...
+//
+// video y marketing no tienen API real todavía (ver ADVERTENCIA en sus
+// paquetes), así que no hay test de integración para ellos.
+//
+// Los tests de DNS e Image son autocontenidos: crean sus propios recursos con
+// nombres únicos y los eliminan al final (t.Cleanup), incluso si el test
+// falla a medias. El test de Mail envía un correo real y por eso requiere un
+// gate adicional (WA_TEST_MAIL_TO) para no disparar envíos por accidente.
+package api_test
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/webability/webability-go/dns"
+	"github.com/webability/webability-go/image"
+	"github.com/webability/webability-go/mail"
+	"github.com/webability/webability-go/wa"
+)
+
+// integrationAPI construye un wa.API con credenciales reales tomadas del
+// entorno, o salta el test si no están configuradas.
+func integrationAPI(t *testing.T) *wa.API {
+	t.Helper()
+
+	clientID := os.Getenv("WA_TEST_CLIENT_ID")
+	token := os.Getenv("WA_TEST_TOKEN")
+	if clientID == "" || token == "" {
+		t.Skip("WA_TEST_CLIENT_ID / WA_TEST_TOKEN no configurados — saltando test de integración")
+	}
+
+	if baseURL := os.Getenv("WA_TEST_BASE_URL"); baseURL != "" {
+		return wa.NewWithURL(baseURL, clientID, token)
+	}
+	return wa.New(clientID, token)
+}
+
+// uniqueSuffix da un sufijo corto y suficientemente único para no chocar con
+// recursos de otras corridas (incluso en paralelo).
+func uniqueSuffix() string {
+	return strconv.FormatInt(time.Now().UnixNano(), 36)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// dns — integración real: crear zona → agregar registro → leer → modificar
+// → eliminar registro → eliminar zona
+// ─────────────────────────────────────────────────────────────────────────
+
+func TestIntegration_DNS(t *testing.T) {
+	api := integrationAPI(t)
+	d := dns.New(api)
+
+	zoneName := fmt.Sprintf("wa-client-test-%s.example.com", uniqueSuffix())
+
+	added, err := d.AddZone(zoneName)
+	if err != nil {
+		t.Fatalf("AddZone(%q): %v", zoneName, err)
+	}
+	if added.Key == 0 || added.Name != zoneName {
+		t.Fatalf("AddZone result = %+v", added)
+	}
+
+	// Limpieza garantizada aunque el resto del test falle a medias.
+	t.Cleanup(func() {
+		if err := d.DeleteZone(added.Key); err != nil {
+			t.Logf("cleanup: DeleteZone(%d) falló: %v", added.Key, err)
+		}
+	})
+
+	rec, err := d.AddRecord(added.Key, dns.RecordInput{
+		Name: "@", RRType: "A", TTL: 1800, Data: "203.0.113.10",
+	})
+	if err != nil {
+		t.Fatalf("AddRecord: %v", err)
+	}
+	if rec.Key == 0 || rec.Zone != added.Key {
+		t.Fatalf("AddRecord result = %+v", rec)
+	}
+
+	zone, err := d.GetZone(zoneName)
+	if err != nil {
+		t.Fatalf("GetZone(%q): %v", zoneName, err)
+	}
+	if zone.Zone.Key != added.Key {
+		t.Fatalf("GetZone.Zone.Key = %d, want %d", zone.Zone.Key, added.Key)
+	}
+	found := false
+	for _, r := range zone.Records {
+		if r.Key == rec.Key {
+			found = true
+			if r.Data != "203.0.113.10" {
+				t.Fatalf("registro leído con data = %q, want 203.0.113.10", r.Data)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("el registro recién creado (key=%d) no aparece en GetZone: %+v", rec.Key, zone.Records)
+	}
+
+	newTTL := 3600
+	newData := "203.0.113.20"
+	if err := d.UpdateRecord(rec.Key, dns.RecordUpdate{TTL: &newTTL, Data: &newData}); err != nil {
+		t.Fatalf("UpdateRecord: %v", err)
+	}
+
+	zone2, err := d.GetZone(zoneName)
+	if err != nil {
+		t.Fatalf("GetZone tras update: %v", err)
+	}
+	for _, r := range zone2.Records {
+		if r.Key == rec.Key && r.Data != newData {
+			t.Fatalf("después de UpdateRecord, data = %q, want %q", r.Data, newData)
+		}
+	}
+
+	if err := d.DeleteRecord(rec.Key); err != nil {
+		t.Fatalf("DeleteRecord: %v", err)
+	}
+
+	zones, err := d.ListZones()
+	if err != nil {
+		t.Fatalf("ListZones: %v", err)
+	}
+	present := false
+	for _, z := range zones.Zones {
+		if z.Key == added.Key {
+			present = true
+		}
+	}
+	if !present {
+		t.Fatalf("la zona recién creada (key=%d) no aparece en ListZones", added.Key)
+	}
+	// La eliminación de la zona la hace t.Cleanup.
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// image — integración real: subir → obtener → eliminar
+// ─────────────────────────────────────────────────────────────────────────
+
+func TestIntegration_Image(t *testing.T) {
+	api := integrationAPI(t)
+	img := image.New(api)
+
+	path := fmt.Sprintf("wa-client-test/%s.jpg", uniqueSuffix())
+	content := "contenido de prueba — wa-client-test " + uniqueSuffix()
+
+	uploaded, err := img.Upload(path, path[strings.LastIndex(path, "/")+1:], strings.NewReader(content))
+	if err != nil {
+		t.Fatalf("Upload(%q): %v", path, err)
+	}
+	if uploaded.Path != path {
+		t.Fatalf("Upload result = %+v, want path=%q", uploaded, path)
+	}
+
+	t.Cleanup(func() {
+		if _, err := img.Delete(path); err != nil {
+			t.Logf("cleanup: Delete(%q) falló: %v", path, err)
+		}
+	})
+
+	// El GET real procesa/transcodifica la imagen (webp/avif/jpg), así que no
+	// podemos comparar bytes con el original — solo confirmamos que responde
+	// 200 con contenido no vacío para una salida chica.
+	resp, err := img.Get(strings.TrimSuffix(path, ".jpg") + "/100x100/" + path[strings.LastIndex(path, "/")+1:] + ".jpg")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if resp.StatusCode != 200 || len(resp.Body) == 0 {
+		t.Fatalf("Get status=%d, body_len=%d, want 200 y body no vacío", resp.StatusCode, len(resp.Body))
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// mail — integración real: envía un correo real, por eso requiere un gate
+// adicional (WA_TEST_MAIL_TO) para no disparar envíos por accidente.
+// ─────────────────────────────────────────────────────────────────────────
+
+func TestIntegration_Mail(t *testing.T) {
+	api := integrationAPI(t)
+
+	to := os.Getenv("WA_TEST_MAIL_TO")
+	if to == "" {
+		t.Skip("WA_TEST_MAIL_TO no configurado — saltando test de envío real de correo")
+	}
+
+	m := mail.New(api)
+
+	out, err := m.Send(mail.SendRequest{
+		From:    mail.Address{Email: "no-reply@webability.info", Name: "WA Client Test"},
+		To:      mail.Recipient{Email: to},
+		Subject: "[wa-client-test] " + uniqueSuffix(),
+		Text:    "Este es un correo de prueba de integración de github.com/webability/webability-go.",
+	})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if out.QueueKey == 0 || out.To != to {
+		t.Fatalf("Send result = %+v", out)
+	}
+}
