@@ -197,21 +197,85 @@ func TestIntegration_Mail(t *testing.T) {
 
 	to := os.Getenv("WA_TEST_MAIL_TO")
 	if to == "" {
-		t.Skip("WA_TEST_MAIL_TO no configurado — saltando test de envío real de correo")
+		t.Skip("WA_TEST_MAIL_TO no configurado — saltando tests de envío real de correo")
 	}
 
 	m := mail.New(api)
 
-	out, err := m.Send(mail.SendRequest{
-		From:    mail.Address{Email: "no-reply@webability.info", Name: "WA Client Test"},
-		To:      mail.Recipient{Email: to},
-		Subject: "[wa-client-test] " + uniqueSuffix(),
-		Text:    "Este es un correo de prueba de integración de github.com/webability/webability-go.",
+	t.Run("Send a un correo existente termina en sent", func(t *testing.T) {
+		out, err := m.Send(mail.SendRequest{
+			From:     mail.Address{Email: "no-reply@webability.info", Name: "WA Client Test"},
+			To:       mail.Recipient{Email: to},
+			Subject:  "[wa-client-test] " + uniqueSuffix(),
+			Text:     "Este es un correo de prueba de integración de github.com/webability/webability-go.",
+			WaitSend: true,
+		})
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if out.QueueKey == 0 || out.To != to {
+			t.Fatalf("Send result = %+v", out)
+		}
+
+		status := pollMailStatus(t, m, out.QueueKey)
+		if status.QueueStatus != mail.QueueStatusSent {
+			t.Fatalf("QueueStatus final = %q (detalle: %q), want %q",
+				status.QueueStatus, status.ErrorDetail, mail.QueueStatusSent)
+		}
 	})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if out.QueueKey == 0 || out.To != to {
-		t.Fatalf("Send result = %+v", out)
+
+	t.Run("Send a un dominio inexistente termina en error", func(t *testing.T) {
+		badTo := fmt.Sprintf("no-existe-%s@dominio-invalido-wa-client-test.invalid", uniqueSuffix())
+		out, err := m.Send(mail.SendRequest{
+			From:     mail.Address{Email: "no-reply@webability.info", Name: "WA Client Test"},
+			To:       mail.Recipient{Email: badTo},
+			Subject:  "[wa-client-test] " + uniqueSuffix(),
+			Text:     "Este correo se espera que rebote — dominio inexistente a propósito.",
+			WaitSend: true,
+		})
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if out.QueueKey == 0 {
+			t.Fatalf("Send result = %+v", out)
+		}
+
+		status := pollMailStatus(t, m, out.QueueKey)
+		if status.QueueStatus != mail.QueueStatusError {
+			t.Fatalf("QueueStatus final = %q, want %q (se esperaba que el envío a un dominio inexistente fallara)",
+				status.QueueStatus, mail.QueueStatusError)
+		}
+		if status.ErrorDetail == "" {
+			t.Fatal("ErrorDetail vacío, se esperaba el detalle del rechazo SMTP")
+		}
+	})
+
+	t.Run("Status de una clave de cola inexistente", func(t *testing.T) {
+		_, err := m.Status(999999999)
+		if err == nil {
+			t.Fatal("se esperaba error para una clave de cola inexistente")
+		}
+	})
+}
+
+// pollMailStatus consulta Status repetidamente hasta que el envío se resuelva
+// (sent/error) o se agote un tiempo máximo del lado del cliente — un colchón
+// extra sobre el timeout de wait_send del servidor, por si el mailer está
+// momentáneamente saturado.
+func pollMailStatus(t *testing.T, m *mail.Mail, queueKey int) *mail.StatusResult {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		status, err := m.Status(queueKey)
+		if err != nil {
+			t.Fatalf("Status(%d): %v", queueKey, err)
+		}
+		if status.QueueStatus != mail.QueueStatusPending && status.QueueStatus != mail.QueueStatusProcessing {
+			return status
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Status(%d) no se resolvió a tiempo, quedó en %q", queueKey, status.QueueStatus)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 }

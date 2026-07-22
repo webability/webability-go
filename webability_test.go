@@ -507,6 +507,162 @@ func TestMail(t *testing.T) {
 		if out.QueueKey != 42 || out.To != "cliente@ejemplo.com" {
 			t.Fatalf("Send result = %+v", out)
 		}
+		if out.QueueStatus != "" {
+			t.Fatalf("QueueStatus = %q, el mock no lo envió, debería quedar vacío", out.QueueStatus)
+		}
+	})
+
+	t.Run("Send sin WaitSend responde pending de inmediato", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/mail/send", func(w http.ResponseWriter, r *http.Request) {
+			var body mail.SendRequest
+			decodeBody(t, r, &body)
+			if body.WaitSend {
+				t.Errorf("wait_send no debería viajar en true, body = %+v", body)
+			}
+			jsonHandler(t, http.StatusOK, map[string]interface{}{
+				"status": "ok", "queue_key": 100, "queue_status": "pending", "to": body.To.Email,
+			})(w, r)
+		})
+		m := mail.New(newTestAPI(t, mux))
+
+		out, err := m.Send(mail.SendRequest{
+			From:    mail.Address{Email: "no-reply@tuempresa.com"},
+			To:      mail.Recipient{Email: "cliente@ejemplo.com"},
+			Subject: "Asunto",
+			Text:    "cuerpo",
+		})
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if out.QueueStatus != mail.QueueStatusPending {
+			t.Fatalf("QueueStatus = %q, want %q", out.QueueStatus, mail.QueueStatusPending)
+		}
+	})
+
+	t.Run("Send con WaitSend=true resuelto como sent", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/mail/send", func(w http.ResponseWriter, r *http.Request) {
+			var body mail.SendRequest
+			decodeBody(t, r, &body)
+			if !body.WaitSend {
+				t.Errorf("wait_send debería viajar en true, body = %+v", body)
+			}
+			jsonHandler(t, http.StatusOK, map[string]interface{}{
+				"status": "ok", "queue_key": 101, "queue_status": "sent", "to": body.To.Email,
+			})(w, r)
+		})
+		m := mail.New(newTestAPI(t, mux))
+
+		out, err := m.Send(mail.SendRequest{
+			From:     mail.Address{Email: "no-reply@tuempresa.com"},
+			To:       mail.Recipient{Email: "cliente@ejemplo.com"},
+			Subject:  "Asunto",
+			Text:     "cuerpo",
+			WaitSend: true,
+		})
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if out.QueueStatus != mail.QueueStatusSent {
+			t.Fatalf("QueueStatus = %q, want %q", out.QueueStatus, mail.QueueStatusSent)
+		}
+		if out.ErrorDetail != "" {
+			t.Fatalf("ErrorDetail = %q, no debería venir en un envío exitoso", out.ErrorDetail)
+		}
+	})
+
+	t.Run("Send con WaitSend=true resuelto como error (correo inexistente)", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/mail/send", func(w http.ResponseWriter, r *http.Request) {
+			var body mail.SendRequest
+			decodeBody(t, r, &body)
+			jsonHandler(t, http.StatusOK, map[string]interface{}{
+				"status": "ok", "queue_key": 102, "queue_status": "error",
+				"error_detail": "550 5.1.1 The email account does not exist", "to": body.To.Email,
+			})(w, r)
+		})
+		m := mail.New(newTestAPI(t, mux))
+
+		out, err := m.Send(mail.SendRequest{
+			From:     mail.Address{Email: "no-reply@tuempresa.com"},
+			To:       mail.Recipient{Email: "no-existe@dominio-invalido.example"},
+			Subject:  "Asunto",
+			Text:     "cuerpo",
+			WaitSend: true,
+		})
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if out.QueueStatus != mail.QueueStatusError {
+			t.Fatalf("QueueStatus = %q, want %q", out.QueueStatus, mail.QueueStatusError)
+		}
+		if out.ErrorDetail == "" {
+			t.Fatalf("ErrorDetail vacío, se esperaba el detalle del rechazo SMTP")
+		}
+	})
+
+	t.Run("Status pending/processing/sent/error", func(t *testing.T) {
+		cases := []struct {
+			name       string
+			mockStatus string
+			mockDetail string
+			want       string
+		}{
+			{"pendiente", "pending", "", mail.QueueStatusPending},
+			{"procesando", "processing", "", mail.QueueStatusProcessing},
+			{"enviado", "sent", "", mail.QueueStatusSent},
+			{"error", "error", "550 mailbox unavailable", mail.QueueStatusError},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				mux := http.NewServeMux()
+				mux.HandleFunc("/v1/mail/status/200", func(w http.ResponseWriter, r *http.Request) {
+					if r.Method != http.MethodGet {
+						t.Errorf("method = %s, want GET", r.Method)
+					}
+					resp := map[string]interface{}{
+						"status": "ok", "queue_key": 200, "queue_status": c.mockStatus,
+					}
+					if c.mockDetail != "" {
+						resp["error_detail"] = c.mockDetail
+					}
+					jsonHandler(t, http.StatusOK, resp)(w, r)
+				})
+				m := mail.New(newTestAPI(t, mux))
+
+				out, err := m.Status(200)
+				if err != nil {
+					t.Fatalf("Status: %v", err)
+				}
+				if out.QueueStatus != c.want {
+					t.Fatalf("QueueStatus = %q, want %q", out.QueueStatus, c.want)
+				}
+				if out.ErrorDetail != c.mockDetail {
+					t.Fatalf("ErrorDetail = %q, want %q", out.ErrorDetail, c.mockDetail)
+				}
+			})
+		}
+	})
+
+	t.Run("Status de una cola inexistente devuelve APIError", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/mail/status/999999", jsonHandler(t, http.StatusNotFound, map[string]interface{}{
+			"status": "error", "code": 3024, "message": "Cola no encontrada",
+		}))
+		m := mail.New(newTestAPI(t, mux))
+
+		_, err := m.Status(999999)
+		if err == nil {
+			t.Fatal("se esperaba error")
+		}
+		apiErr, ok := err.(*wa.APIError)
+		if !ok {
+			t.Fatalf("error = %T, want *wa.APIError", err)
+		}
+		if apiErr.Code != 3024 || apiErr.StatusCode != http.StatusNotFound {
+			t.Fatalf("APIError = %+v, want code=3024 status=404", apiErr)
+		}
 	})
 
 	t.Run("SendBulk con resultados mixtos (queued y error)", func(t *testing.T) {

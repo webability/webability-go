@@ -45,22 +45,65 @@ type SendRequest struct {
 	Tags        []string  `json:"tags,omitempty"`
 	TrackOpens  bool      `json:"track_opens,omitempty"`
 	TrackClicks bool      `json:"track_clicks,omitempty"`
+	// WaitSend, si es true, espera (hasta ~20s del lado del servidor) el
+	// resultado real del envío antes de responder, en vez de responder de
+	// inmediato con QueueStatus="pending". Si el envío no se resuelve dentro
+	// de ese tiempo, la respuesta degrada a QueueStatus="pending" de todas
+	// formas — usa Status(queueKey) para consultarlo después.
+	WaitSend bool `json:"wait_send,omitempty"`
 }
+
+// Estados posibles de QueueStatus en SendResult y Status().
+const (
+	QueueStatusPending    = "pending"
+	QueueStatusProcessing = "processing"
+	QueueStatusSent       = "sent"
+	QueueStatusError      = "error"
+)
 
 // SendResult es la respuesta de Send.
 type SendResult struct {
-	Status   string `json:"status"`
-	QueueKey int    `json:"queue_key"`
-	To       string `json:"to"`
+	Status      string `json:"status"`
+	QueueKey    int    `json:"queue_key"`
+	QueueStatus string `json:"queue_status"`
+	ErrorDetail string `json:"error_detail,omitempty"`
+	To          string `json:"to"`
 }
 
 // Send envía un correo a un solo destinatario. POST /v1/mail/send
+//
+// Sin WaitSend, QueueStatus siempre viene "pending" — el envío real ocurre
+// asíncronamente; usa Status(out.QueueKey) para conocer el resultado. Con
+// WaitSend=true, QueueStatus puede venir ya resuelto ("sent"/"error") si el
+// servidor lo confirmó a tiempo.
 func (m *Mail) Send(req SendRequest) (*SendResult, error) {
 	resp, err := m.API.Post("/v1/mail/send", req)
 	if err != nil {
 		return nil, err
 	}
 	var out SendResult
+	if err := resp.Decode(&out); err != nil {
+		return nil, fmt.Errorf("decodificando respuesta: %w", err)
+	}
+	return &out, nil
+}
+
+// StatusResult es la respuesta de Status.
+type StatusResult struct {
+	Status      string `json:"status"`
+	QueueKey    int    `json:"queue_key"`
+	QueueStatus string `json:"queue_status"`
+	ErrorDetail string `json:"error_detail,omitempty"`
+}
+
+// Status consulta el estatus real de un envío hecho con Send.
+// GET /v1/mail/status/{queue_key}
+func (m *Mail) Status(queueKey int) (*StatusResult, error) {
+	resp, err := m.API.Get(fmt.Sprintf("/v1/mail/status/%d", queueKey))
+	if err != nil {
+		return nil, err
+	}
+	var out StatusResult
 	if err := resp.Decode(&out); err != nil {
 		return nil, fmt.Errorf("decodificando respuesta: %w", err)
 	}
