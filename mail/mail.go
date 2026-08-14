@@ -45,9 +45,11 @@ type SendRequest struct {
 	// (que se ignoran si Template viene). La personalización se hace con las
 	// Vars de To, sin ningún prefijo en los nombres — dentro del contenido de
 	// la plantilla (definido en Consola → Correos → Plantillas) se acceden
-	// como {{vars>clave}}, no {{clave}} a secas (eso último solo aplica al
-	// envío ad-hoc, sin Template). El servidor valida que la plantilla exista
-	// y esté activa ANTES de encolar el correo — si no, Send devuelve un
+	// exactamente igual que en el envío ad-hoc: {{clave}} directo. La
+	// plantilla solo ve Vars, nunca el resto del mensaje (To, From, Subject,
+	// etc.) — si necesitas imprimir alguno de esos datos dentro del cuerpo,
+	// agrégalo también a Vars. El servidor valida que la plantilla exista y
+	// esté activa ANTES de encolar el correo — si no, Send devuelve un
 	// *wa.APIError síncrono (no un envío "pending" fallido).
 	Template    string   `json:"template,omitempty"`
 	Subject     string   `json:"subject"`
