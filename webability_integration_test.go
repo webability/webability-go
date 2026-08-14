@@ -19,6 +19,14 @@
 // nombres únicos y los eliminan al final (t.Cleanup), incluso si el test
 // falla a medias. El test de Mail envía un correo real y por eso requiere un
 // gate adicional (WA_TEST_MAIL_TO) para no disparar envíos por accidente.
+//
+// El caso de "template válido" requiere además WA_TEST_MAIL_TEMPLATE: el id
+// de una plantilla ya creada y activa para la cuenta de prueba desde
+// Consola → Correos → Plantillas (no hay forma de crearla por API, es el
+// comportamiento esperado — ver /documentacion/mail#template). Sin esa
+// variable, ese subtest se salta; el de "template inexistente" (3025) corre
+// siempre que corre TestIntegration_Mail, porque no depende de datos
+// preexistentes en la cuenta.
 package api_test
 
 import (
@@ -254,6 +262,51 @@ func TestIntegration_Mail(t *testing.T) {
 		_, err := m.Status(999999999)
 		if err == nil {
 			t.Fatal("se esperaba error para una clave de cola inexistente")
+		}
+	})
+
+	t.Run("Send con template inexistente devuelve APIError 3025 sin encolar", func(t *testing.T) {
+		badTemplate := "wa-client-test-no-existe-" + uniqueSuffix()
+		_, err := m.Send(mail.SendRequest{
+			From:     mail.Address{Email: "no-reply@webability.info", Name: "WA Client Test"},
+			To:       mail.Recipient{Email: to},
+			Template: badTemplate,
+		})
+		if err == nil {
+			t.Fatalf("se esperaba error para el template inexistente %q", badTemplate)
+		}
+		apiErr, ok := err.(*wa.APIError)
+		if !ok {
+			t.Fatalf("error = %T (%v), want *wa.APIError", err, err)
+		}
+		if apiErr.Code != 3025 {
+			t.Fatalf("APIError = %+v, want code=3025", apiErr)
+		}
+	})
+
+	t.Run("Send con template real y activa termina en sent", func(t *testing.T) {
+		template := os.Getenv("WA_TEST_MAIL_TEMPLATE")
+		if template == "" {
+			t.Skip("WA_TEST_MAIL_TEMPLATE no configurado — saltando test de envío con plantilla registrada")
+		}
+
+		out, err := m.Send(mail.SendRequest{
+			From:     mail.Address{Email: "no-reply@webability.info", Name: "WA Client Test"},
+			To:       mail.Recipient{Email: to, Vars: map[string]interface{}{"nombre": "WA Client Test"}},
+			Template: template,
+			WaitSend: true,
+		})
+		if err != nil {
+			t.Fatalf("Send con template=%q: %v", template, err)
+		}
+		if out.QueueKey == 0 {
+			t.Fatalf("Send result = %+v", out)
+		}
+
+		status := pollMailStatus(t, m, out.QueueKey)
+		if status.QueueStatus != mail.QueueStatusSent {
+			t.Fatalf("QueueStatus final = %q (detalle: %q), want %q",
+				status.QueueStatus, status.ErrorDetail, mail.QueueStatusSent)
 		}
 	})
 }
