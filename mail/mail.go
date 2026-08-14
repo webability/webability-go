@@ -37,14 +37,22 @@ type Recipient struct {
 
 // SendRequest son los campos para POST /v1/mail/send.
 type SendRequest struct {
-	From        Address   `json:"from"`
-	To          Recipient `json:"to"`
-	Subject     string    `json:"subject"`
-	HTML        string    `json:"html,omitempty"`
-	Text        string    `json:"text,omitempty"`
-	Tags        []string  `json:"tags,omitempty"`
-	TrackOpens  bool      `json:"track_opens,omitempty"`
-	TrackClicks bool      `json:"track_clicks,omitempty"`
+	From Address   `json:"from"`
+	To   Recipient `json:"to"`
+	// Template, si viene, es el id de una plantilla ya registrada y activa del
+	// lado de WebAbility (bajo la cuenta que autentica este request) — el
+	// servidor arma el correo con esa plantilla en vez de Subject/HTML/Text
+	// (que se ignoran si Template viene). La personalización se hace con las
+	// Vars de To, igual que en el envío ad-hoc. El servidor valida que la
+	// plantilla exista y esté activa ANTES de encolar el correo — si no,
+	// Send devuelve un *wa.APIError síncrono (no un envío "pending" fallido).
+	Template    string   `json:"template,omitempty"`
+	Subject     string   `json:"subject"`
+	HTML        string   `json:"html,omitempty"`
+	Text        string   `json:"text,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	TrackOpens  bool     `json:"track_opens,omitempty"`
+	TrackClicks bool     `json:"track_clicks,omitempty"`
 	// WaitSend, si es true, espera (hasta ~20s del lado del servidor) el
 	// resultado real del envío antes de responder, en vez de responder de
 	// inmediato con QueueStatus="pending". Si el envío no se resuelve dentro

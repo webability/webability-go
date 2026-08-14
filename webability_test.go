@@ -512,6 +512,87 @@ func TestMail(t *testing.T) {
 		}
 	})
 
+	t.Run("Send con Template envía el id y las vars, sin subject/html/text", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/mail/send", func(w http.ResponseWriter, r *http.Request) {
+			var body mail.SendRequest
+			decodeBody(t, r, &body)
+			if body.Template != "bienvenida" {
+				t.Errorf("Template = %q, want %q", body.Template, "bienvenida")
+			}
+			if body.Subject != "" || body.HTML != "" || body.Text != "" {
+				t.Errorf("Subject/HTML/Text deberían ir vacíos cuando se usa Template, body = %+v", body)
+			}
+			if body.To.Vars["nombre"] != "Ana" {
+				t.Errorf("vars no llegaron: %+v", body.To.Vars)
+			}
+			jsonHandler(t, http.StatusOK, map[string]interface{}{
+				"status": "ok", "queue_key": 50, "queue_status": "pending", "to": body.To.Email,
+			})(w, r)
+		})
+		m := mail.New(newTestAPI(t, mux))
+
+		out, err := m.Send(mail.SendRequest{
+			From:     mail.Address{Email: "no-reply@tuempresa.com", Name: "Tu Empresa"},
+			To:       mail.Recipient{Email: "cliente@ejemplo.com", Name: "Ana", Vars: map[string]interface{}{"nombre": "Ana"}},
+			Template: "bienvenida",
+		})
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if out.QueueKey != 50 {
+			t.Fatalf("Send result = %+v", out)
+		}
+	})
+
+	t.Run("Send con Template inexistente devuelve APIError 3025", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/mail/send", jsonHandler(t, http.StatusNotFound, map[string]interface{}{
+			"status": "error", "code": 3025, "message": "Plantilla 'no-existe' no encontrada para esta cuenta",
+		}))
+		m := mail.New(newTestAPI(t, mux))
+
+		_, err := m.Send(mail.SendRequest{
+			From:     mail.Address{Email: "no-reply@tuempresa.com"},
+			To:       mail.Recipient{Email: "cliente@ejemplo.com"},
+			Template: "no-existe",
+		})
+		if err == nil {
+			t.Fatal("se esperaba error")
+		}
+		apiErr, ok := err.(*wa.APIError)
+		if !ok {
+			t.Fatalf("error = %T, want *wa.APIError", err)
+		}
+		if apiErr.Code != 3025 || apiErr.StatusCode != http.StatusNotFound {
+			t.Fatalf("APIError = %+v, want code=3025 status=404", apiErr)
+		}
+	})
+
+	t.Run("Send con Template inactiva devuelve APIError 3026", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/mail/send", jsonHandler(t, http.StatusBadRequest, map[string]interface{}{
+			"status": "error", "code": 3026, "message": "Plantilla 'borrador' no está activa",
+		}))
+		m := mail.New(newTestAPI(t, mux))
+
+		_, err := m.Send(mail.SendRequest{
+			From:     mail.Address{Email: "no-reply@tuempresa.com"},
+			To:       mail.Recipient{Email: "cliente@ejemplo.com"},
+			Template: "borrador",
+		})
+		if err == nil {
+			t.Fatal("se esperaba error")
+		}
+		apiErr, ok := err.(*wa.APIError)
+		if !ok {
+			t.Fatalf("error = %T, want *wa.APIError", err)
+		}
+		if apiErr.Code != 3026 || apiErr.StatusCode != http.StatusBadRequest {
+			t.Fatalf("APIError = %+v, want code=3026 status=400", apiErr)
+		}
+	})
+
 	t.Run("Send sin WaitSend responde pending de inmediato", func(t *testing.T) {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/v1/mail/send", func(w http.ResponseWriter, r *http.Request) {
