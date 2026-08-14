@@ -43,9 +43,12 @@ type SendRequest struct {
 	// lado de WebAbility (bajo la cuenta que autentica este request) — el
 	// servidor arma el correo con esa plantilla en vez de Subject/HTML/Text
 	// (que se ignoran si Template viene). La personalización se hace con las
-	// Vars de To, igual que en el envío ad-hoc. El servidor valida que la
-	// plantilla exista y esté activa ANTES de encolar el correo — si no,
-	// Send devuelve un *wa.APIError síncrono (no un envío "pending" fallido).
+	// Vars de To, sin ningún prefijo en los nombres — dentro del contenido de
+	// la plantilla (definido en Consola → Correos → Plantillas) se acceden
+	// como {{vars>clave}}, no {{clave}} a secas (eso último solo aplica al
+	// envío ad-hoc, sin Template). El servidor valida que la plantilla exista
+	// y esté activa ANTES de encolar el correo — si no, Send devuelve un
+	// *wa.APIError síncrono (no un envío "pending" fallido).
 	Template    string   `json:"template,omitempty"`
 	Subject     string   `json:"subject"`
 	HTML        string   `json:"html,omitempty"`

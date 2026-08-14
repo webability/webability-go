@@ -17,4 +17,4 @@
 package api
 
 // VERSION es la versión actual de la librería cliente de la API de WebAbility.
-const VERSION = "0.1.1"
+const VERSION = "0.1.2"
